@@ -3,7 +3,7 @@
 
 #include <linux/fs.h>
 #include <linux/cdev.h>
-#include <linux/lzfse.h>
+#include <linux/lz4.h>
 
 #include <asm/uaccess.h>
 
@@ -78,22 +78,32 @@ int lzfse_decompress_open(struct inode *inode, struct file *filp)
 
 int lzfse_release(struct inode *inode, struct file *filp)
 {
-    printk(KERN_ALERT "RELEASE\n");
+    int ret = 0;
+    size_t new_buf_len = BUFFER_SIZE;
     
+    printk(KERN_ALERT "RELEASE\n");
     printk(KERN_ALERT "WROTE: %d\n", wrote);
+
 
     if (wrote) {
         if (w_mode == 0) {
             printk(KERN_ALERT "COMPRESS\n");
-            buf_len = lzfse_encode_buffer(store_buf, BUFFER_SIZE, tmp_buf, buf_len, wrk);
+            buf_len = lz4hc_compress(tmp_buf, buf_len, store_buf, &new_buf_len, wrk);
         } else {
             printk(KERN_ALERT "DECOMPRESS\n");
-            buf_len = lzfse_decode_buffer(store_buf, BUFFER_SIZE, tmp_buf, buf_len, wrk);
+            ret = lz4_decompress_unknownoutputsize(tmp_buf, buf_len, store_buf, &new_buf_len);
         }
+        if (ret == 0)
+            buf_len = new_buf_len;
+        else
+            buf_len = 0;
     }
 
 
     printk(KERN_ALERT "RELEASE END\n");
+    if (ret != 0) {
+        printk(KERN_ALERT "COMPRESS/DECOMPRESS ERROR\n");
+    }
 
 	return 0;
 }

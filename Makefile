@@ -11,9 +11,8 @@ else
 	PWD := $(shell pwd)
 	KERNELDIR ?= $(PWD)/../linux
 
-# ARCH=um is additional flag to build for User Mode Linux
 # CFLAGS=... disable PIE, some gcc binaries have PIE enabled by deafault
 default:
-	$(MAKE) -C $(KERNELDIR) M=$(PWD) ARCH=um CFLAGS='-no-pie -fno-pie -fno-PIE' modules
+	$(MAKE) -C $(KERNELDIR) M=$(PWD) CFLAGS='-no-pie -fno-pie -fno-PIE' modules
 
 endif
