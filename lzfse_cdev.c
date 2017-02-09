@@ -3,7 +3,7 @@
 
 #include <linux/fs.h>
 #include <linux/cdev.h>
-#include <linux/lz4.h>
+#include <linux/crypto.h>
 
 #include <asm/uaccess.h>
 
@@ -30,7 +30,7 @@ ssize_t lzfse_read(struct file *filp, char __user *buf, size_t count,
         count = buf_len - *f_pos;
     
     if (count > 0)
-        copy_to_user(buf, &store_buf[*f_pos], count);
+        copy_to_user(buf, store_buf + *f_pos, count);
     
     *f_pos += count;
     
@@ -46,7 +46,7 @@ ssize_t lzfse_write(struct file *filp, const char __user *buf, size_t count,
         count = BUFFER_SIZE - *f_pos;
 
     if (count > 0)
-        copy_from_user(&tmp_buf[*f_pos], buf, count);
+        copy_from_user(tmp_buf + *f_pos, buf, count);
 
     buf_len = *f_pos + count;
     
@@ -78,25 +78,36 @@ int lzfse_decompress_open(struct inode *inode, struct file *filp)
 
 int lzfse_release(struct inode *inode, struct file *filp)
 {
+    struct crypto_comp *tfm;
+
     int ret = 0;
-    size_t new_buf_len = BUFFER_SIZE;
+    unsigned int new_buf_len = BUFFER_SIZE;
     
     printk(KERN_ALERT "RELEASE\n");
     printk(KERN_ALERT "WROTE: %d\n", wrote);
 
 
     if (wrote) {
-        if (w_mode == 0) {
-            printk(KERN_ALERT "COMPRESS\n");
-            buf_len = lz4hc_compress(tmp_buf, buf_len, store_buf, &new_buf_len, wrk);
+        tfm = crypto_alloc_comp("lz4hc", 0, 0);
+
+        if (!IS_ERR(tfm)) {
+            if (w_mode == 0) {
+                printk(KERN_ALERT "COMPRESS\n");
+                ret = crypto_comp_compress(tfm, tmp_buf, buf_len, store_buf, &new_buf_len);
+            } else {
+                printk(KERN_ALERT "DECOMPRESS\n");
+                ret = crypto_comp_decompress(tfm, tmp_buf, buf_len, store_buf, &new_buf_len);
+            }
+            if (ret == 0)
+                buf_len = new_buf_len;
+            else
+                buf_len = 0;
+
+            crypto_free_comp(tfm);
         } else {
-            printk(KERN_ALERT "DECOMPRESS\n");
-            ret = lz4_decompress_unknownoutputsize(tmp_buf, buf_len, store_buf, &new_buf_len);
+            ret = -1;
+            printk(KERN_ALERT "CAN'T ALLOC COMPRESS ALGO\n");
         }
-        if (ret == 0)
-            buf_len = new_buf_len;
-        else
-            buf_len = 0;
     }
 
 
@@ -105,7 +116,7 @@ int lzfse_release(struct inode *inode, struct file *filp)
         printk(KERN_ALERT "COMPRESS/DECOMPRESS ERROR\n");
     }
 
-	return 0;
+	return ret;
 }
 
 struct file_operations lzfse_compress_fops = {
