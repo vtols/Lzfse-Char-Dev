@@ -1,6 +1,7 @@
 #include <linux/init.h>
 #include <linux/module.h>
 
+#include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/crypto.h>
@@ -12,14 +13,17 @@ MODULE_LICENSE("Dual BSD/GPL");
 #define LZFSE_MAJOR             566
 #define LZFSE_MINOR_COMPRESS    0
 #define LZFSE_MINOR_DECOMPRESS  1
-#define BUFFER_SIZE             (4096*2)
-#define SCRATCH_BUFFER          (1024*1024)
+#define LZFSE_MINOR_OPTION      2
+#define BUFFER_SIZE             (60*1024*1024)
+#define MARK_SIZE               sizeof(size_t)
 
-struct cdev compress, decompress;
+struct cdev compress, decompress, options;
 
-char store_buf[BUFFER_SIZE], tmp_buf[BUFFER_SIZE], wrk[SCRATCH_BUFFER];
+char store_buf[BUFFER_SIZE], tmp_buf[BUFFER_SIZE];
 int w_mode = 0, wrote;
 size_t buf_len = 0;
+size_t block_size = 4096;
+char algo[10];
 
 ssize_t lzfse_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
@@ -76,12 +80,20 @@ int lzfse_decompress_open(struct inode *inode, struct file *filp)
     return 0;
 }
 
+int lzfse_opt_open(struct inode *inode, struct file *filp)
+{
+    printk(KERN_ALERT "OPTION OPEN\n");
+    
+    return 0;
+}
+
 int lzfse_release(struct inode *inode, struct file *filp)
 {
     struct crypto_comp *tfm;
 
     int ret = 0;
-    unsigned int new_buf_len = BUFFER_SIZE;
+    unsigned int new_buf_len = 0, to_decode, out_len;
+    char *r_pos = tmp_buf, *w_pos = store_buf;
     
     printk(KERN_ALERT "RELEASE\n");
     printk(KERN_ALERT "WROTE: %d\n", wrote);
@@ -92,16 +104,44 @@ int lzfse_release(struct inode *inode, struct file *filp)
 
         if (!IS_ERR(tfm)) {
             if (w_mode == 0) {
-                printk(KERN_ALERT "COMPRESS\n");
-                ret = crypto_comp_compress(tfm, tmp_buf, buf_len, store_buf, &new_buf_len);
+                printk(KERN_ALERT "COMPRESS, %s by %zu bytes blocks\n",
+                    algo, block_size);
+                
+                while (buf_len > 0) {
+                    to_decode = min(block_size, buf_len);
+                    buf_len -= to_decode;
+                    out_len = BUFFER_SIZE;
+                    ret = crypto_comp_compress(tfm, r_pos, to_decode,
+                            w_pos + MARK_SIZE, &out_len);
+                    if (ret != 0) {
+                        new_buf_len = 0;
+                        break;
+                    }
+                    r_pos += to_decode;
+                    *((size_t *) w_pos) = out_len;
+                    w_pos += MARK_SIZE + out_len;
+                    new_buf_len += MARK_SIZE + out_len;
+                }
+                *((size_t *) w_pos) = 0;
             } else {
-                printk(KERN_ALERT "DECOMPRESS\n");
-                ret = crypto_comp_decompress(tfm, tmp_buf, buf_len, store_buf, &new_buf_len);
+                printk(KERN_ALERT "DECOMPRESS %s\n", algo);
+                
+                while (buf_len > 0) {
+                    to_decode = *((size_t *) r_pos);
+                    buf_len -= MARK_SIZE + to_decode;
+                    out_len = BUFFER_SIZE;
+                    ret = crypto_comp_decompress(tfm, r_pos + MARK_SIZE,
+                            to_decode, w_pos, &out_len);
+                    if (ret != 0) {
+                        new_buf_len = 0;
+                        break;
+                    }
+                    r_pos += MARK_SIZE + to_decode;
+                    w_pos += out_len;
+                    new_buf_len += out_len;
+                }
             }
-            if (ret == 0)
-                buf_len = new_buf_len;
-            else
-                buf_len = 0;
+            buf_len = new_buf_len;
 
             crypto_free_comp(tfm);
         } else {
@@ -117,6 +157,12 @@ int lzfse_release(struct inode *inode, struct file *filp)
     }
 
 	return ret;
+}
+
+int lzfse_opt_release(struct inode *inode, struct file *filp)
+{
+    sscanf(tmp_buf, "%zu %s", &block_size, &algo);
+    return 0;
 }
 
 struct file_operations lzfse_compress_fops = {
@@ -135,6 +181,13 @@ struct file_operations lzfse_decompress_fops = {
 	.release =  lzfse_release,
 };
 
+struct file_operations lzfse_opt_fops = {
+	.owner =    THIS_MODULE,
+	.open =     lzfse_opt_open,
+	.write =    lzfse_write,
+	.release =  lzfse_opt_release,
+};
+
 static int lzfse_init(void)
 {
     dev_t dev;
@@ -142,7 +195,7 @@ static int lzfse_init(void)
     printk(KERN_ALERT "Hello, world\n");
     
     dev = MKDEV(LZFSE_MAJOR, 0);
-    register_chrdev_region(dev, 2, "lzfse");
+    register_chrdev_region(dev, 3, "lzfse");
     
     
     dev = MKDEV(LZFSE_MAJOR, LZFSE_MINOR_COMPRESS);
@@ -156,6 +209,14 @@ static int lzfse_init(void)
 	decompress.owner = THIS_MODULE;
 	decompress.ops = &lzfse_decompress_fops;
 	cdev_add(&decompress, dev, 1);
+    
+    dev = MKDEV(LZFSE_MAJOR, LZFSE_MINOR_OPTION);
+    cdev_init(&options, &lzfse_opt_fops);
+	options.owner = THIS_MODULE;
+	options.ops = &lzfse_opt_fops;
+	cdev_add(&options, dev, 1);
+    
+    strcpy(algo, "lzo");
     
     return 0;
 }
